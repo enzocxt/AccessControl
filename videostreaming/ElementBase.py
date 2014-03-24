@@ -8,7 +8,12 @@ import math, Queue, threading, struct, traceback, time, datetime
 import pyccn
 import utils
 
+from encrypt import AESCipher
+
 __all__ = ["CCNPacketizer", "CCNDepacketizer"]
+
+# encryption flag
+encrypt_flag = True
 
 # offset, element count
 packet_hdr = "!HB"
@@ -174,6 +179,10 @@ class CCNPacketizer(object):
 		self._signed_info = pyccn.SignedInfo(self._key.publicKeyID, pyccn.KeyLocator(self._name_key), freshness = freshness)
 		self._signed_info_frames = pyccn.SignedInfo(self._key.publicKeyID, pyccn.KeyLocator(self._name_key), freshness = 1)
 
+		# key for encrypting content
+#		self._data_key = os.urandom(16)
+		self._data_key = '123456789asdfghj'
+
 		self._segmenter = DataSegmenter(self.send_data, self._chunk_size)
 
 		signed_info = pyccn.SignedInfo(self._key.publicKeyID, pyccn.KeyLocator(self._key), freshness = freshness)
@@ -219,7 +228,14 @@ class CCNPacketizer(object):
 
 		# Make sure the timestamp is regenerated
 		self._signed_info.ccn_data_dirty = True
-		co = pyccn.ContentObject(name, packet, self._signed_info)
+		
+		if encrypt_flag:
+			aes = AESCipher(self._data_key)
+			enc_packet = aes.encrypt(packet)
+			co = pyccn.ContentObject(name, enc_packet, self._signed_info)
+		else :
+			co = pyccn.ContentObject(name, packet, self._signed_info)
+		
 		co.sign(self._key)
 		self.publisher.put(co)
 
@@ -269,6 +285,14 @@ class CCNDepacketizer(pyccn.Closure):
 		self._uri = pyccn.Name(uri)
 		self._name_segments = self._uri + 'segments'
 		self._name_frames = self._uri + 'index'
+
+		# key to decrypt content
+		self._data_key = None
+		self._name_of_dataKey = pyccn.Name('test/VideoSite/Movie/DataKey')
+		self._dataKey_flag = False
+
+		# aes for decryption
+		self.aes = None
 
 		self._pipeline = None
 		self._segmenter = DataSegmenter(self.push_data)
@@ -513,14 +537,37 @@ class CCNDepacketizer(pyccn.Closure):
 
 		return True
 
+	def get_data_key(self):
+		debug(self, "Fetching data key from %s ..." % self._name_of_dataKey)
+		
+		co = self._get_handle.get(self._name_of_dataKey, pyccn.Interest(publisherPublicKeyDigest = self.publisher_id))
+		if not co:
+			debug(self, "Unable to fetch %s" % self._name_of_dataKey)
+			exit(10)
+				
+		self._data_key = co.content
+
+		return self._data_key
+
 	def process_response(self, co):
 		if not co:
 			self._segmenter.packet_lost()
 			return
 
 		timestamp = co.signedInfo.py_timestamp
+		
+		if encrypt_flag:
+			if self._dataKey_flag == False:
+				self._data_key = self.get_data_key()
+				self._dataKey_flag = True
+			
+			if self.aes == None:
+				self.aes = AESCipher(self._data_key)
 
-		self._segmenter.process_packet(timestamp, co.content)
+			dec_content = self.aes.decrypt(co.content)
+			self._segmenter.process_packet(timestamp, dec_content)
+		else :
+			self._segmenter.process_packet(timestamp, co.content)
 
 	def push_data(self, timestamp, buf):
 		status = 0
